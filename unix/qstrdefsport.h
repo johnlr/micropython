@@ -30,6 +30,7 @@ Q(Test)
 
 Q(fileno)
 Q(makefile)
+Q(buffering)
 
 Q(FileIO)
 Q(flush)
@@ -45,6 +46,14 @@ Q(getenv)
 Q(mkdir)
 Q(ilistdir)
 Q(errno)
+#if MICROPY_FSUSERMOUNT
+Q(vfs_mount)
+Q(vfs_umount)
+Q(vfs_mkfs)
+#endif
+#if MICROPY_VFS_FAT
+Q(VfsFat)
+#endif
 #if MICROPY_PY_OS_DUPTERM
 Q(dupterm)
 #endif

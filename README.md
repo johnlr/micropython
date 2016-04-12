@@ -16,6 +16,7 @@ The MicroPython project
 
 This is the MicroPython project, which aims to put an implementation
 of Python 3.x on microcontrollers and small embedded systems.
+You can find the official website at [micropython.org](http://www.micropython.org).
 
 WARNING: this project is in beta stage and is subject to changes of the
 code-base, including project-wide name changes and API changes.
@@ -129,7 +130,7 @@ The STM version
 
 The "stmhal" port requires an ARM compiler, arm-none-eabi-gcc, and associated
 bin-utils.  For those using Arch Linux, you need arm-none-eabi-binutils and
-arm-none-eabi-gcc packages from the AUR.  Otherwise, try here:
+arm-none-eabi-gcc packages.  Otherwise, try here:
 https://launchpad.net/gcc-arm-embedded
 
 To build:
@@ -145,9 +146,7 @@ Then to flash the code via USB DFU to your device:
 
     $ make deploy
 
-You will need the dfu-util program, on Arch Linux it's dfu-util-git in the
-AUR.  If the above does not work it may be because you don't have the
-correct permissions.  Try then:
-
-    $ sudo dfu-util -a 0 -d 0483:df11 -D build-PYBV10/firmware.dfu
-
+This will use the included `tools/pydfu.py` script.  If flashing the firmware
+does not work it may be because you don't have the correct permissions, and
+need to use `sudo make deploy`.
+See the README.md file in the stmhal/ directory for further details.

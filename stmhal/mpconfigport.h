@@ -31,6 +31,7 @@
 // options to control how Micro Python is built
 
 #define MICROPY_ALLOC_PATH_MAX      (128)
+#define MICROPY_PERSISTENT_CODE_LOAD (1)
 #define MICROPY_EMIT_THUMB          (1)
 #define MICROPY_EMIT_INLINE_THUMB   (1)
 #define MICROPY_COMP_MODULE_CONST   (1)
@@ -53,7 +54,7 @@
 #define MICROPY_FATFS_LFN_CODE_PAGE    (437) /* 1=SFN/ANSI 437=LFN/U.S.(OEM) */
 #define MICROPY_FATFS_USE_LABEL        (1)
 #define MICROPY_FATFS_RPATH            (2)
-#define MICROPY_FATFS_VOLUMES          (3)
+#define MICROPY_FATFS_VOLUMES          (4)
 #define MICROPY_FATFS_MULTI_PARTITION  (1)
 #define MICROPY_FSUSERMOUNT            (1)
 
@@ -182,9 +183,6 @@ extern const struct _mp_obj_module_t mp_module_network;
     \
     /* pointers to all CAN objects (if they have been created) */ \
     struct _pyb_can_obj_t *pyb_can_obj_all[2]; \
-    \
-    /* for user-mountable block device */ \
-    struct _fs_user_mount_t *fs_user_mount; \
     \
     /* list of registered NICs */ \
     mp_obj_list_t mod_network_nic_list; \

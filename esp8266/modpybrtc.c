@@ -49,6 +49,20 @@ typedef struct _pyb_rtc_obj_t {
 // singleton RTC object
 STATIC const pyb_rtc_obj_t pyb_rtc_obj = {{&pyb_rtc_type}};
 
+void mp_hal_rtc_init(void) {
+    uint32_t magic;
+
+    system_rtc_mem_read(MEM_USER_MAGIC_ADDR, &magic, sizeof(magic));
+    if (magic != MEM_MAGIC) {
+        magic = MEM_MAGIC;
+        system_rtc_mem_write(MEM_USER_MAGIC_ADDR, &magic, sizeof(magic));
+        uint32_t cal = system_rtc_clock_cali_proc();
+        int64_t delta = 0;
+        system_rtc_mem_write(MEM_CAL_ADDR, &cal, sizeof(cal));
+        system_rtc_mem_write(MEM_DELTA_ADDR, &delta, sizeof(delta));
+    }
+}
+
 STATIC mp_obj_t pyb_rtc_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp_uint_t n_kw, const mp_obj_t *args) {
     // check arguments
     mp_arg_check_num(n_args, n_kw, 0, 0, false);
@@ -58,7 +72,7 @@ STATIC mp_obj_t pyb_rtc_make_new(const mp_obj_type_t *type, mp_uint_t n_args, mp
 }
 
 STATIC uint64_t pyb_rtc_raw_us(uint64_t cal) {
-    return system_get_rtc_time() * ((cal >> 12) * 1000 + (cal & 0xfff) / 4) / 1000;
+    return (system_get_rtc_time() * cal) >> 12;
 };
 
 void pyb_rtc_set_us_since_2000(uint64_t nowus) {
@@ -146,7 +160,7 @@ STATIC mp_obj_t pyb_rtc_memory(mp_uint_t n_args, const mp_obj_t *args) {
         }
 
         magic = MEM_MAGIC;
-        system_rtc_mem_write(MEM_USER_MAGIC_ADDR, &magic, sizeof(len));
+        system_rtc_mem_write(MEM_USER_MAGIC_ADDR, &magic, sizeof(magic));
         len = bufinfo.len;
         system_rtc_mem_write(MEM_USER_LEN_ADDR, &len, sizeof(len));
 

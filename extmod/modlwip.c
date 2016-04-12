@@ -27,6 +27,7 @@
 
 #include <string.h>
 #include <errno.h>
+#include <stdio.h>
 
 #include "py/nlr.h"
 #include "py/objlist.h"
@@ -42,6 +43,14 @@
 #include "lwip/udp.h"
 //#include "lwip/raw.h"
 #include "lwip/dns.h"
+
+// For compatibilily with older lwIP versions.
+#ifndef ip_set_option
+#define ip_set_option(pcb, opt)   ((pcb)->so_options |= (opt))
+#endif
+#ifndef ip_reset_option
+#define ip_reset_option(pcb, opt) ((pcb)->so_options &= ~(opt))
+#endif
 
 #ifdef MICROPY_PY_LWIP_SLIP
 #include "netif/slipif.h"
@@ -152,6 +161,9 @@ STATIC const mp_obj_type_t lwip_slip_type = {
 
 // Extension to lwIP error codes
 #define _ERR_BADF -16
+// TODO: We just know that change happened somewhere between 1.4.0 and 1.4.1,
+// investigate in more detail.
+#if LWIP_VERSION < 0x01040100
 static const int error_lookup_table[] = {
     0,             /* ERR_OK          0      No error, everything OK. */
     ENOMEM,        /* ERR_MEM        -1      Out of memory error.     */
@@ -161,6 +173,28 @@ static const int error_lookup_table[] = {
     EINPROGRESS,   /* ERR_INPROGRESS -5      Operation in progress    */
     EINVAL,        /* ERR_VAL        -6      Illegal value.           */
     EWOULDBLOCK,   /* ERR_WOULDBLOCK -7      Operation would block.   */
+
+    ECONNABORTED,  /* ERR_ABRT       -8      Connection aborted.      */
+    ECONNRESET,    /* ERR_RST        -9      Connection reset.        */
+    ENOTCONN,      /* ERR_CLSD       -10     Connection closed.       */
+    ENOTCONN,      /* ERR_CONN       -11     Not connected.           */
+    EIO,           /* ERR_ARG        -12     Illegal argument.        */
+    EADDRINUSE,    /* ERR_USE        -13     Address in use.          */
+    -1,            /* ERR_IF         -14     Low-level netif error    */
+    EALREADY,      /* ERR_ISCONN     -15     Already connected.       */
+    EBADF,         /* _ERR_BADF      -16     Closed socket (null pcb) */
+};
+#else
+static const int error_lookup_table[] = {
+    0,             /* ERR_OK          0      No error, everything OK. */
+    ENOMEM,        /* ERR_MEM        -1      Out of memory error.     */
+    ENOBUFS,       /* ERR_BUF        -2      Buffer error.            */
+    EWOULDBLOCK,   /* ERR_TIMEOUT    -3      Timeout                  */
+    EHOSTUNREACH,  /* ERR_RTE        -4      Routing problem.         */
+    EINPROGRESS,   /* ERR_INPROGRESS -5      Operation in progress    */
+    EINVAL,        /* ERR_VAL        -6      Illegal value.           */
+    EWOULDBLOCK,   /* ERR_WOULDBLOCK -7      Operation would block.   */
+
     EADDRINUSE,    /* ERR_USE        -8      Address in use.          */
     EALREADY,      /* ERR_ISCONN     -9      Already connected.       */
     ECONNABORTED,  /* ERR_ABRT       -10     Connection aborted.      */
@@ -171,6 +205,7 @@ static const int error_lookup_table[] = {
     -1,            /* ERR_IF         -15     Low-level netif error    */
     EBADF,         /* _ERR_BADF      -16     Closed socket (null pcb) */
 };
+#endif
 
 /*******************************************************************************/
 // The socket object provided by lwip.socket.
@@ -210,8 +245,11 @@ typedef struct _lwip_socket_obj_t {
 } lwip_socket_obj_t;
 
 static inline void poll_sockets(void) {
-    // TODO: Allow to override by ports
+#ifdef MICROPY_EVENT_POLL_HOOK
+    MICROPY_EVENT_POLL_HOOK;
+#else
     mp_hal_delay_ms(1);
+#endif
 }
 
 /*******************************************************************************/
@@ -250,9 +288,19 @@ STATIC err_t _lwip_tcp_connected(void *arg, struct tcp_pcb *tpcb, err_t err) {
     return ERR_OK;
 }
 
+// By default, a child socket of listen socket is created with recv
+// handler which discards incoming pbuf's. We don't want to do that,
+// so set this handler which requests lwIP to keep pbuf's and deliver
+// them later. We cannot cache pbufs in child socket on Python side,
+// until it is created in accept().
+STATIC err_t _lwip_tcp_recv_unaccepted(void *arg, struct tcp_pcb *pcb, struct pbuf *p, err_t err) {
+    return ERR_BUF;
+}
+
 // Callback for incoming tcp connections.
 STATIC err_t _lwip_tcp_accept(void *arg, struct tcp_pcb *newpcb, err_t err) {
     lwip_socket_obj_t *socket = (lwip_socket_obj_t*)arg;
+    tcp_recv(newpcb, _lwip_tcp_recv_unaccepted);
 
     if (socket->incoming.connection != NULL) {
         // We need to handle this better. This single-level structure makes the
@@ -278,19 +326,6 @@ STATIC err_t _lwip_tcp_recv(void *arg, struct tcp_pcb *tcpb, struct pbuf *p, err
     }
     socket->incoming.pbuf = p;
     return ERR_OK;
-}
-
-STATIC uint8_t lwip_dns_returned;
-STATIC uint8_t lwip_dns_result[4];
-
-// Callback for incoming DNS requests. Just set our results.
-STATIC void _lwip_dns_incoming(const char *name, ip_addr_t *addr, void *callback_arg) {
-    if (addr != NULL) {
-        lwip_dns_returned = 1;
-        memcpy(lwip_dns_result, addr, sizeof(lwip_dns_result));
-    } else {
-        lwip_dns_returned = 2;
-    }
 }
 
 /*******************************************************************************/
@@ -347,7 +382,7 @@ STATIC mp_uint_t lwip_udp_receive(lwip_socket_obj_t *socket, byte *buf, mp_uint_
             }
         } else {
             while (socket->incoming.pbuf == NULL) {
-                mp_hal_delay_ms(100);
+                poll_sockets();
             }
         }
     }
@@ -369,6 +404,35 @@ STATIC mp_uint_t lwip_udp_receive(lwip_socket_obj_t *socket, byte *buf, mp_uint_
 // Helper function for send/sendto to handle TCP packets
 STATIC mp_uint_t lwip_tcp_send(lwip_socket_obj_t *socket, const byte *buf, mp_uint_t len, int *_errno) {
     u16_t available = tcp_sndbuf(socket->pcb.tcp);
+
+    if (available == 0) {
+        // Non-blocking socket
+        if (socket->timeout == 0) {
+            *_errno = EAGAIN;
+            return -1;
+        }
+
+        mp_uint_t start = mp_hal_ticks_ms();
+        // Assume that STATE_PEER_CLOSED may mean half-closed connection, where peer closed it
+        // sending direction, but not receiving. Consequently, check for both STATE_CONNECTED
+        // and STATE_PEER_CLOSED as normal conditions and still waiting for buffers to be sent.
+        // If peer fully closed socket, we would have socket->state set to ERR_RST (connection
+        // reset) by error callback.
+        // Avoid sending too small packets, so wait until at least 16 bytes available
+        while (socket->state >= STATE_CONNECTED && (available = tcp_sndbuf(socket->pcb.tcp)) < 16) {
+            if (socket->timeout != -1 && mp_hal_ticks_ms() - start > socket->timeout) {
+                *_errno = ETIMEDOUT;
+                return -1;
+            }
+            poll_sockets();
+        }
+
+        if (socket->state < 0) {
+            *_errno = error_lookup_table[-socket->state];
+            return -1;
+        }
+    }
+
     u16_t write_len = MIN(available, len);
 
     err_t err = tcp_write(socket->pcb.tcp, buf, write_len, TCP_WRITE_FLAG_COPY);
@@ -383,19 +447,31 @@ STATIC mp_uint_t lwip_tcp_send(lwip_socket_obj_t *socket, const byte *buf, mp_ui
 
 // Helper function for recv/recvfrom to handle TCP packets
 STATIC mp_uint_t lwip_tcp_receive(lwip_socket_obj_t *socket, byte *buf, mp_uint_t len, int *_errno) {
-
-    if (socket->state == STATE_PEER_CLOSED) {
-        return 0;
-    }
-
     if (socket->incoming.pbuf == NULL) {
+
+        // Non-blocking socket
+        if (socket->timeout == 0) {
+            *_errno = EAGAIN;
+            return -1;
+        }
+
         mp_uint_t start = mp_hal_ticks_ms();
-        while (socket->incoming.pbuf == NULL) {
+        while (socket->state == STATE_CONNECTED && socket->incoming.pbuf == NULL) {
             if (socket->timeout != -1 && mp_hal_ticks_ms() - start > socket->timeout) {
                 *_errno = ETIMEDOUT;
                 return -1;
             }
             poll_sockets();
+        }
+        if (socket->state == STATE_PEER_CLOSED) {
+            if (socket->incoming.pbuf == NULL) {
+                // socket closed and no data left in buffer
+                return 0;
+            }
+        } else if (socket->state != STATE_CONNECTED) {
+            assert(socket->state < 0);
+            *_errno = error_lookup_table[-socket->state];
+            return -1;
         }
     }
 
@@ -424,8 +500,14 @@ STATIC mp_uint_t lwip_tcp_receive(lwip_socket_obj_t *socket, byte *buf, mp_uint_
 
 STATIC const mp_obj_type_t lwip_socket_type;
 
+STATIC void lwip_socket_print(const mp_print_t *print, mp_obj_t self_in, mp_print_kind_t kind) {
+    lwip_socket_obj_t *self = self_in;
+    mp_printf(print, "<socket state=%d timeout=%d incoming=%p remaining=%d>", self->state, self->timeout,
+        self->incoming.pbuf, self->leftover_count);
+}
+
 // FIXME: Only supports two arguments at present
-STATIC mp_obj_t lwip_socket_make_new(mp_obj_t type_in, mp_uint_t n_args,
+STATIC mp_obj_t lwip_socket_make_new(const mp_obj_type_t *type, mp_uint_t n_args,
     mp_uint_t n_kw, const mp_obj_t *args) {
     mp_arg_check_num(n_args, n_kw, 0, 4, false);
 
@@ -587,7 +669,7 @@ STATIC mp_obj_t lwip_socket_accept(mp_obj_t self_in) {
             }
         } else {
             while (socket->incoming.connection == NULL) {
-                mp_hal_delay_ms(100);
+                poll_sockets();
             }
         }
     }
@@ -670,7 +752,7 @@ STATIC mp_obj_t lwip_socket_connect(mp_obj_t self_in, mp_obj_t addr_in) {
                 }
             } else {
                 while (socket->state == STATE_CONNECTING) {
-                    mp_hal_delay_ms(100);
+                    poll_sockets();
                 }
             }
             if (socket->state == STATE_CONNECTED) {
@@ -694,16 +776,20 @@ STATIC mp_obj_t lwip_socket_connect(mp_obj_t self_in, mp_obj_t addr_in) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_socket_connect_obj, lwip_socket_connect);
 
+STATIC void lwip_socket_check_connected(lwip_socket_obj_t *socket) {
+    if (socket->pcb.tcp == NULL) {
+        // not connected
+        int _errno = error_lookup_table[-socket->state];
+        socket->state = _ERR_BADF;
+        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
+    }
+}
+
 STATIC mp_obj_t lwip_socket_send(mp_obj_t self_in, mp_obj_t buf_in) {
     lwip_socket_obj_t *socket = self_in;
     int _errno;
 
-    if (socket->pcb.tcp == NULL) {
-        // not connected
-        _errno = error_lookup_table[-(socket->state)];
-        socket->state = _ERR_BADF;
-        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
-    }
+    lwip_socket_check_connected(socket);
 
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(buf_in, &bufinfo, MP_BUFFER_READ);
@@ -731,12 +817,7 @@ STATIC mp_obj_t lwip_socket_recv(mp_obj_t self_in, mp_obj_t len_in) {
     lwip_socket_obj_t *socket = self_in;
     int _errno;
 
-    if (socket->pcb.tcp == NULL) {
-        // not connected
-        _errno = error_lookup_table[-(socket->state)];
-        socket->state = _ERR_BADF;
-        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
-    }
+    lwip_socket_check_connected(socket);
 
     mp_int_t len = mp_obj_get_int(len_in);
     vstr_t vstr;
@@ -769,12 +850,7 @@ STATIC mp_obj_t lwip_socket_sendto(mp_obj_t self_in, mp_obj_t data_in, mp_obj_t 
     lwip_socket_obj_t *socket = self_in;
     int _errno;
 
-    if (socket->pcb.tcp == NULL) {
-        // not connected
-        _errno = error_lookup_table[-(socket->state)];
-        socket->state = _ERR_BADF;
-        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
-    }
+    lwip_socket_check_connected(socket);
 
     mp_buffer_info_t bufinfo;
     mp_get_buffer_raise(data_in, &bufinfo, MP_BUFFER_READ);
@@ -805,12 +881,7 @@ STATIC mp_obj_t lwip_socket_recvfrom(mp_obj_t self_in, mp_obj_t len_in) {
     lwip_socket_obj_t *socket = self_in;
     int _errno;
 
-    if (socket->pcb.tcp == NULL) {
-        // not connected
-        _errno = error_lookup_table[-(socket->state)];
-        socket->state = _ERR_BADF;
-        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(_errno)));
-    }
+    lwip_socket_check_connected(socket);
 
     mp_int_t len = mp_obj_get_int(len_in);
     vstr_t vstr;
@@ -864,6 +935,70 @@ STATIC mp_obj_t lwip_socket_settimeout(mp_obj_t self_in, mp_obj_t timeout_in) {
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_socket_settimeout_obj, lwip_socket_settimeout);
 
+STATIC mp_obj_t lwip_socket_setblocking(mp_obj_t self_in, mp_obj_t flag_in) {
+    lwip_socket_obj_t *socket = self_in;
+    bool val = mp_obj_is_true(flag_in);
+    if (val) {
+        socket->timeout = -1;
+    } else {
+        socket->timeout = 0;
+    }
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_socket_setblocking_obj, lwip_socket_setblocking);
+
+STATIC mp_obj_t lwip_socket_setsockopt(mp_uint_t n_args, const mp_obj_t *args) {
+    (void)n_args; // always 4
+    lwip_socket_obj_t *socket = args[0];
+    mp_int_t val = mp_obj_get_int(args[3]);
+    switch (mp_obj_get_int(args[2])) {
+        case SOF_REUSEADDR:
+            // Options are common for UDP and TCP pcb's.
+            if (val) {
+                ip_set_option(socket->pcb.tcp, SOF_REUSEADDR);
+            } else {
+                ip_reset_option(socket->pcb.tcp, SOF_REUSEADDR);
+            }
+            break;
+        default:
+            printf("Warning: lwip.setsockopt() not implemented\n");
+    }
+    return mp_const_none;
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lwip_socket_setsockopt_obj, 4, 4, lwip_socket_setsockopt);
+
+STATIC mp_obj_t lwip_socket_makefile(mp_uint_t n_args, const mp_obj_t *args) {
+    (void)n_args;
+    return args[0];
+}
+STATIC MP_DEFINE_CONST_FUN_OBJ_VAR_BETWEEN(lwip_socket_makefile_obj, 1, 3, lwip_socket_makefile);
+
+STATIC mp_uint_t lwip_socket_read(mp_obj_t self_in, void *buf, mp_uint_t size, int *errcode) {
+    lwip_socket_obj_t *socket = self_in;
+
+    switch (socket->type) {
+        case MOD_NETWORK_SOCK_STREAM:
+            return lwip_tcp_receive(socket, buf, size, errcode);
+        case MOD_NETWORK_SOCK_DGRAM:
+            return lwip_udp_receive(socket, buf, size, NULL, NULL, errcode);
+    }
+    // Unreachable
+    return MP_STREAM_ERROR;
+}
+
+STATIC mp_uint_t lwip_socket_write(mp_obj_t self_in, const void *buf, mp_uint_t size, int *errcode) {
+    lwip_socket_obj_t *socket = self_in;
+
+    switch (socket->type) {
+        case MOD_NETWORK_SOCK_STREAM:
+            return lwip_tcp_send(socket, buf, size, errcode);
+        case MOD_NETWORK_SOCK_DGRAM:
+            return lwip_udp_send(socket, buf, size, NULL, 0, errcode);
+    }
+    // Unreachable
+    return MP_STREAM_ERROR;
+}
+
 STATIC const mp_map_elem_t lwip_socket_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR___del__), (mp_obj_t)&lwip_socket_close_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_close), (mp_obj_t)&lwip_socket_close_obj },
@@ -876,13 +1011,27 @@ STATIC const mp_map_elem_t lwip_socket_locals_dict_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_sendto), (mp_obj_t)&lwip_socket_sendto_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_recvfrom), (mp_obj_t)&lwip_socket_recvfrom_obj },
     { MP_OBJ_NEW_QSTR(MP_QSTR_settimeout), (mp_obj_t)&lwip_socket_settimeout_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_setblocking), (mp_obj_t)&lwip_socket_setblocking_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_setsockopt), (mp_obj_t)&lwip_socket_setsockopt_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_makefile), (mp_obj_t)&lwip_socket_makefile_obj },
+
+    { MP_OBJ_NEW_QSTR(MP_QSTR_read), (mp_obj_t)&mp_stream_read_obj },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_readline), (mp_obj_t)&mp_stream_unbuffered_readline_obj},
+    { MP_OBJ_NEW_QSTR(MP_QSTR_write), (mp_obj_t)&mp_stream_write_obj },
 };
 STATIC MP_DEFINE_CONST_DICT(lwip_socket_locals_dict, lwip_socket_locals_dict_table);
+
+STATIC const mp_stream_p_t lwip_socket_stream_p = {
+    .read = lwip_socket_read,
+    .write = lwip_socket_write,
+};
 
 STATIC const mp_obj_type_t lwip_socket_type = {
     { &mp_type_type },
     .name = MP_QSTR_socket,
+    .print = lwip_socket_print,
     .make_new = lwip_socket_make_new,
+    .stream_p = &lwip_socket_stream_p,
     .locals_dict = (mp_obj_t)&lwip_socket_locals_dict,
 };
 
@@ -937,41 +1086,59 @@ STATIC mp_obj_t mod_lwip_callback() {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(mod_lwip_callback_obj, mod_lwip_callback);
 
+typedef struct _getaddrinfo_state_t {
+    volatile int status;
+    volatile ip_addr_t ipaddr;
+} getaddrinfo_state_t;
+
+// Callback for incoming DNS requests.
+STATIC void lwip_getaddrinfo_cb(const char *name, ip_addr_t *ipaddr, void *arg) {
+    getaddrinfo_state_t *state = arg;
+    if (ipaddr != NULL) {
+        state->status = 1;
+        state->ipaddr = *ipaddr;
+    } else {
+        // error
+        state->status = -2;
+    }
+}
+
 // lwip.getaddrinfo
 STATIC mp_obj_t lwip_getaddrinfo(mp_obj_t host_in, mp_obj_t port_in) {
     mp_uint_t hlen;
     const char *host = mp_obj_str_get_data(host_in, &hlen);
     mp_int_t port = mp_obj_get_int(port_in);
 
-    ip_addr_t result;
-    lwip_dns_returned = 0;
+    getaddrinfo_state_t state;
+    state.status = 0;
 
-    switch (dns_gethostbyname(host, &result, _lwip_dns_incoming, NULL)) {
-        case ERR_OK: {
-             break;
-        }
-        case ERR_INPROGRESS: {
-            while(!lwip_dns_returned) {
-                mp_hal_delay_ms(100);
-            }
-            if (lwip_dns_returned == 2) {
-                nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(ENOENT)));
+    err_t ret = dns_gethostbyname(host, (ip_addr_t*)&state.ipaddr, lwip_getaddrinfo_cb, &state);
+    switch (ret) {
+        case ERR_OK:
+            // cached
+            state.status = 1;
+            break;
+        case ERR_INPROGRESS:
+            while (state.status == 0) {
+                poll_sockets();
             }
             break;
-        }
-        default: {
-            nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(ENOENT)));
-        }
+        default:
+            state.status = ret;
     }
 
-    uint8_t out_ip[NETUTILS_IPV4ADDR_BUFSIZE];
-    memcpy(out_ip, lwip_dns_result, sizeof(lwip_dns_result));
+    if (state.status < 0) {
+        // TODO: CPython raises gaierror, we raise with native lwIP negative error
+        // values, to differentiate from normal errno's at least in such way.
+        nlr_raise(mp_obj_new_exception_arg1(&mp_type_OSError, MP_OBJ_NEW_SMALL_INT(state.status)));
+    }
+
     mp_obj_tuple_t *tuple = mp_obj_new_tuple(5, NULL);
     tuple->items[0] = MP_OBJ_NEW_SMALL_INT(MOD_NETWORK_AF_INET);
     tuple->items[1] = MP_OBJ_NEW_SMALL_INT(MOD_NETWORK_SOCK_STREAM);
     tuple->items[2] = MP_OBJ_NEW_SMALL_INT(0);
     tuple->items[3] = MP_OBJ_NEW_QSTR(MP_QSTR_);
-    tuple->items[4] = netutils_format_inet_addr(out_ip, port, NETUTILS_BIG);
+    tuple->items[4] = netutils_format_inet_addr((uint8_t*)&state.ipaddr, port, NETUTILS_BIG);
     return mp_obj_new_list(1, (mp_obj_t*)&tuple);
 }
 STATIC MP_DEFINE_CONST_FUN_OBJ_2(lwip_getaddrinfo_obj, lwip_getaddrinfo);
@@ -995,6 +1162,9 @@ STATIC const mp_map_elem_t mp_module_lwip_globals_table[] = {
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOCK_STREAM), MP_OBJ_NEW_SMALL_INT(MOD_NETWORK_SOCK_STREAM) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOCK_DGRAM), MP_OBJ_NEW_SMALL_INT(MOD_NETWORK_SOCK_DGRAM) },
     { MP_OBJ_NEW_QSTR(MP_QSTR_SOCK_RAW), MP_OBJ_NEW_SMALL_INT(MOD_NETWORK_SOCK_RAW) },
+
+    { MP_OBJ_NEW_QSTR(MP_QSTR_SOL_SOCKET), MP_OBJ_NEW_SMALL_INT(1) },
+    { MP_OBJ_NEW_QSTR(MP_QSTR_SO_REUSEADDR), MP_OBJ_NEW_SMALL_INT(SOF_REUSEADDR) },
 };
 
 STATIC MP_DEFINE_CONST_DICT(mp_module_lwip_globals, mp_module_lwip_globals_table);

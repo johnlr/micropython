@@ -166,8 +166,8 @@ STATIC void *parser_alloc(parser_t *parser, size_t num_bytes) {
             sizeof(mp_parse_chunk_t) + chunk->alloc + num_bytes, false);
         if (new_data == NULL) {
             // could not grow existing memory; shrink it to fit previous
-            (void)m_renew(byte, chunk, sizeof(mp_parse_chunk_t) + chunk->alloc,
-                sizeof(mp_parse_chunk_t) + chunk->union_.used);
+            (void)m_renew_maybe(byte, chunk, sizeof(mp_parse_chunk_t) + chunk->alloc,
+                sizeof(mp_parse_chunk_t) + chunk->union_.used, false);
             chunk->alloc = chunk->union_.used;
             chunk->union_.next = parser->tree.chunk;
             parser->tree.chunk = chunk;
@@ -620,7 +620,7 @@ STATIC bool fold_constants(parser_t *parser, const rule_t *rule, size_t num_args
         }
         mp_obj_t dest[2];
         mp_load_method_maybe(elem->value, q_attr, dest);
-        if (!(MP_OBJ_IS_INT(dest[0]) && dest[1] == MP_OBJ_NULL)) {
+        if (!(dest[0] != MP_OBJ_NULL && MP_OBJ_IS_INT(dest[0]) && dest[1] == MP_OBJ_NULL)) {
             return false;
         }
         arg0 = dest[0];

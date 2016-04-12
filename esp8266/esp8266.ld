@@ -5,7 +5,7 @@ MEMORY
     dport0_0_seg : org = 0x3ff00000, len = 0x10
     dram0_0_seg :  org = 0x3ffe8000, len = 0x14000
     iram1_0_seg :  org = 0x40100000, len = 0x8000
-    irom0_0_seg :  org = 0x40210000, len = 0x5A000
+    irom0_0_seg :  org = 0x40209000, len = 0x80000
 }
 
 /* define the top of RAM */
@@ -80,26 +80,84 @@ SECTIONS
         *(.irom0.literal .irom.literal .irom.text.literal .irom0.text .irom.text)
 
         /* we put some specific text in this section */
-        *py/*.o*(.literal* .text*)
-        *pyexec.o(.literal*, .text*)
-        *readline.o(.literal*, .text*)
-        *pybstdio.o(.literal*, .text*)
+
+        *py/argcheck.o*(.literal* .text*)
+        *py/asm*.o*(.literal* .text*)
+        *py/bc.o*(.literal* .text*)
+        *py/binary.o*(.literal* .text*)
+        *py/builtin*.o*(.literal* .text*)
+        *py/compile.o*(.literal* .text*)
+        *py/emit*.o*(.literal* .text*)
+        *py/formatfloat.o*(.literal* .text*)
+        *py/frozenmod.o*(.literal* .text*)
+        *py/gc.o*(.literal* .text*)
+        *py/lexer*.o*(.literal* .text*)
+        *py/malloc*.o*(.literal* .text*)
+        *py/map*.o*(.literal* .text*)
+        *py/mod*.o*(.literal* .text*)
+        *py/mpprint.o*(.literal* .text*)
+        *py/mpstate.o*(.literal* .text*)
+        *py/mpz.o*(.literal* .text*)
+        *py/native*.o*(.literal* .text*)
+        *py/nlr*.o*(.literal* .text*)
+        *py/obj*.o*(.literal* .text*)
+        *py/opmethods.o*(.literal* .text*)
+        *py/parse*.o*(.literal* .text*)
+        *py/qstr.o*(.literal* .text*)
+        *py/repl.o*(.literal* .text*)
+        *py/runtime.o*(.literal* .text*)
+        *py/scope.o*(.literal* .text*)
+        *py/sequence.o*(.literal* .text*)
+        *py/showbc.o*(.literal* .text*)
+        *py/smallint.o*(.literal* .text*)
+        *py/stackctrl.o*(.literal* .text*)
+        *py/stream.o*(.literal* .text*)
+        *py/unicode.o*(.literal* .text*)
+        *py/vm.o*(.literal* .text*)
+        *py/vstr.o*(.literal* .text*)
+        *py/warning.o*(.literal* .text*)
+
+        *extmod/*.o*(.literal* .text*)
+
+        *lib/fatfs/*.o*(.literal*, .text*)
+        *lib/libm/*.o*(.literal*, .text*)
+        *lib/mp-readline/*.o(.literal*, .text*)
+        *lib/netutils/*.o*(.literal*, .text*)
+        *lib/timeutils/*.o*(.literal*, .text*)
+        *lib/utils/*.o*(.literal*, .text*)
+
+        *stmhal/pybstdio.o(.literal*, .text*)
+
         *gccollect.o(.literal* .text*)
         *gchelper.o(.literal* .text*)
+        *lexerstr32.o(.literal* .text*)
+        *utils.o(.literal* .text*)
         *modpyb.o(.literal*, .text*)
         *modpybpin.o(.literal*, .text*)
+        *modpybpwm.o(.literal*, .text*)
         *modpybrtc.o(.literal*, .text*)
+        *modpybadc.o(.literal*, .text*)
+        *modpybuart.o(.literal*, .text*)
+        *modpybi2c.o(.literal*, .text*)
+        *modpybspi.o(.literal*, .text*)
         *modesp.o(.literal* .text*)
         *modnetwork.o(.literal* .text*)
         *moduos.o(.literal* .text*)
         *modutime.o(.literal* .text*)
+        *modlwip.o(.literal* .text*)
+        *modsocket.o(.literal* .text*)
 
         /* we put as much rodata as possible in this section */
         /* note that only rodata accessed as a machine word is allowed here */
         *py/qstr.o(.rodata.const_pool)
-        *py/*.o(.rodata.mp_type_*) /* catches type: mp_obj_type_t */
-        *py/*.o(.rodata.*_locals_dict*) /* catches types: mp_obj_dict_t, mp_map_elem_t */
-        *py/*.o(.rodata.mp_module_*) /* catches types: mp_obj_module_t, mp_obj_dict_t, mp_map_elem_t */
+        *.o(.rodata.mp_type_*) /* catches type: mp_obj_type_t */
+        *.o(.rodata.*_locals_dict*) /* catches types: mp_obj_dict_t, mp_map_elem_t */
+        *.o(.rodata.mp_module_*) /* catches types: mp_obj_module_t, mp_obj_dict_t, mp_map_elem_t */
+        */frozen.o(.rodata.mp_frozen_sizes) /* frozen modules */
+        */frozen.o(.rodata.mp_frozen_content) /* frozen modules */
+
+        /* for -mforce-l32 */
+        build/*.o(.rodata*)
 
         _irom0_text_end = ABSOLUTE(.);
     } >irom0_0_seg :irom0_0_phdr
@@ -172,6 +230,7 @@ SECTIONS
     .rodata : ALIGN(4)
     {
         _rodata_start = ABSOLUTE(.);
+        *(.sdk.version)
         *(.rodata)
         *(.rodata.*)
         *(.gnu.linkonce.r.*)
