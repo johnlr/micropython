@@ -1,5 +1,5 @@
 /*
- * This file is part of the Micro Python project, http://micropython.org/
+ * This file is part of the MicroPython project, http://micropython.org/
  *
  * The MIT License (MIT)
  *
@@ -27,12 +27,13 @@
 #include <string.h>
 #include "py/obj.h"
 #include "py/runtime.h"
+#include "py/builtin.h"
 #include "py/repl.h"
 
 #if MICROPY_HELPER_REPL
 
 STATIC bool str_startswith_word(const char *str, const char *head) {
-    mp_uint_t i;
+    size_t i;
     for (i = 0; str[i] && head[i]; i++) {
         if (str[i] != head[i]) {
             return false;
@@ -57,6 +58,9 @@ bool mp_repl_continue_with_input(const char *input) {
         || str_startswith_word(input, "with")
         || str_startswith_word(input, "def")
         || str_startswith_word(input, "class")
+        #if MICROPY_PY_ASYNC_AWAIT
+        || str_startswith_word(input, "async")
+        #endif
         ;
 
     // check for unmatched open bracket, quote or escape quote
@@ -85,7 +89,7 @@ bool mp_repl_continue_with_input(const char *input) {
             } else if (in_quote == Q_NONE || in_quote == Q_1_DOUBLE) {
                 in_quote = Q_1_DOUBLE - in_quote;
             }
-        } else if (*i == '\\' && (i[1] == '\'' || i[1] == '"')) {
+        } else if (*i == '\\' && (i[1] == '\'' || i[1] == '"' || i[1] == '\\')) {
             if (in_quote != Q_NONE) {
                 i++;
             }
@@ -102,8 +106,13 @@ bool mp_repl_continue_with_input(const char *input) {
         }
     }
 
-    // continue if unmatched brackets or quotes
-    if (n_paren > 0 || n_brack > 0 || n_brace > 0 || in_quote == Q_3_SINGLE || in_quote == Q_3_DOUBLE) {
+    // continue if unmatched 3-quotes
+    if (in_quote == Q_3_SINGLE || in_quote == Q_3_DOUBLE) {
+        return true;
+    }
+
+    // continue if unmatched brackets, but only if not in a 1-quote
+    if ((n_paren > 0 || n_brack > 0 || n_brace > 0) && in_quote == Q_NONE) {
         return true;
     }
 
@@ -121,8 +130,9 @@ bool mp_repl_continue_with_input(const char *input) {
     return false;
 }
 
-mp_uint_t mp_repl_autocomplete(const char *str, mp_uint_t len, const mp_print_t *print, const char **compl_str) {
+size_t mp_repl_autocomplete(const char *str, size_t len, const mp_print_t *print, const char **compl_str) {
     // scan backwards to find start of "a.b.c" chain
+    const char *org_str = str;
     const char *top = str + len;
     for (const char *s = top; --s >= str;) {
         if (!(unichar_isalpha(*s) || unichar_isdigit(*s) || *s == '_' || *s == '.')) {
@@ -132,8 +142,11 @@ mp_uint_t mp_repl_autocomplete(const char *str, mp_uint_t len, const mp_print_t 
         }
     }
 
-    // begin search in locals dict
-    mp_obj_dict_t *dict = mp_locals_get();
+    size_t nqstr = QSTR_TOTAL();
+
+    // begin search in outer global dict which is accessed from __main__
+    mp_obj_t obj = MP_OBJ_FROM_PTR(&mp_module___main__);
+    mp_obj_t dest[2];
 
     for (;;) {
         // get next word in string to complete
@@ -141,44 +154,21 @@ mp_uint_t mp_repl_autocomplete(const char *str, mp_uint_t len, const mp_print_t 
         while (str < top && *str != '.') {
             ++str;
         }
-        mp_uint_t s_len = str - s_start;
+        size_t s_len = str - s_start;
 
         if (str < top) {
-            // a complete word, lookup in current dict
-
-            mp_obj_t obj = MP_OBJ_NULL;
-            for (mp_uint_t i = 0; i < dict->map.alloc; i++) {
-                if (MP_MAP_SLOT_IS_FILLED(&dict->map, i)) {
-                    mp_uint_t d_len;
-                    const char *d_str = mp_obj_str_get_data(dict->map.table[i].key, &d_len);
-                    if (s_len == d_len && strncmp(s_start, d_str, d_len) == 0) {
-                        obj = dict->map.table[i].value;
-                        break;
-                    }
-                }
+            // a complete word, lookup in current object
+            qstr q = qstr_find_strn(s_start, s_len);
+            if (q == MP_QSTR_NULL) {
+                // lookup will fail
+                return 0;
             }
+            mp_load_method_protected(obj, q, dest, true);
+            obj = dest[0]; // attribute, method, or MP_OBJ_NULL if nothing found
 
             if (obj == MP_OBJ_NULL) {
                 // lookup failed
                 return 0;
-            }
-
-            // found an object of this name; try to get its dict
-            if (MP_OBJ_IS_TYPE(obj, &mp_type_module)) {
-                dict = mp_obj_module_get_globals(obj);
-            } else {
-                mp_obj_type_t *type;
-                if (MP_OBJ_IS_TYPE(obj, &mp_type_type)) {
-                    type = MP_OBJ_TO_PTR(obj);
-                } else {
-                    type = mp_obj_get_type(obj);
-                }
-                if (type->locals_dict != NULL && type->locals_dict->base.type == &mp_type_dict) {
-                    dict = type->locals_dict;
-                } else {
-                    // obj has no dict
-                    return 0;
-                }
             }
 
             // skip '.' to move to next word
@@ -188,39 +178,53 @@ mp_uint_t mp_repl_autocomplete(const char *str, mp_uint_t len, const mp_print_t 
             // end of string, do completion on this partial name
 
             // look for matches
-            int n_found = 0;
             const char *match_str = NULL;
-            mp_uint_t match_len = 0;
-            for (mp_uint_t i = 0; i < dict->map.alloc; i++) {
-                if (MP_MAP_SLOT_IS_FILLED(&dict->map, i)) {
-                    mp_uint_t d_len;
-                    const char *d_str = mp_obj_str_get_data(dict->map.table[i].key, &d_len);
-                    if (s_len <= d_len && strncmp(s_start, d_str, s_len) == 0) {
+            size_t match_len = 0;
+            qstr q_first = 0, q_last = 0;
+            for (qstr q = MP_QSTR_ + 1; q < nqstr; ++q) {
+                size_t d_len;
+                const char *d_str = (const char*)qstr_data(q, &d_len);
+                if (s_len <= d_len && strncmp(s_start, d_str, s_len) == 0) {
+                    mp_load_method_protected(obj, q, dest, true);
+                    if (dest[0] != MP_OBJ_NULL) {
                         if (match_str == NULL) {
                             match_str = d_str;
                             match_len = d_len;
                         } else {
                             // search for longest common prefix of match_str and d_str
                             // (assumes these strings are null-terminated)
-                            for (mp_uint_t j = s_len; j <= match_len && j <= d_len; ++j) {
+                            for (size_t j = s_len; j <= match_len && j <= d_len; ++j) {
                                 if (match_str[j] != d_str[j]) {
                                     match_len = j;
                                     break;
                                 }
                             }
                         }
-                        ++n_found;
+                        if (q_first == 0) {
+                            q_first = q;
+                        }
+                        q_last = q;
                     }
                 }
             }
 
             // nothing found
-            if (n_found == 0) {
+            if (q_first == 0) {
+                // If there're no better alternatives, and if it's first word
+                // in the line, try to complete "import".
+                if (s_start == org_str) {
+                    static const char import_str[] = "import ";
+                    if (memcmp(s_start, import_str, s_len) == 0) {
+                        *compl_str = import_str + s_len;
+                        return sizeof(import_str) - 1 - s_len;
+                    }
+                }
+
                 return 0;
             }
 
             // 1 match found, or multiple matches with a common prefix
-            if (n_found == 1 || match_len > s_len) {
+            if (q_first == q_last || match_len > s_len) {
                 *compl_str = match_str + s_len;
                 return match_len - s_len;
             }
@@ -231,11 +235,12 @@ mp_uint_t mp_repl_autocomplete(const char *str, mp_uint_t len, const mp_print_t 
             #define MAX_LINE_LEN  (4 * WORD_SLOT_LEN)
 
             int line_len = MAX_LINE_LEN; // force a newline for first word
-            for (mp_uint_t i = 0; i < dict->map.alloc; i++) {
-                if (MP_MAP_SLOT_IS_FILLED(&dict->map, i)) {
-                    mp_uint_t d_len;
-                    const char *d_str = mp_obj_str_get_data(dict->map.table[i].key, &d_len);
-                    if (s_len <= d_len && strncmp(s_start, d_str, s_len) == 0) {
+            for (qstr q = q_first; q <= q_last; ++q) {
+                size_t d_len;
+                const char *d_str = (const char*)qstr_data(q, &d_len);
+                if (s_len <= d_len && strncmp(s_start, d_str, s_len) == 0) {
+                    mp_load_method_protected(obj, q, dest, true);
+                    if (dest[0] != MP_OBJ_NULL) {
                         int gap = (line_len + WORD_SLOT_LEN - 1) / WORD_SLOT_LEN * WORD_SLOT_LEN - line_len;
                         if (gap < 2) {
                             gap += WORD_SLOT_LEN;
@@ -256,7 +261,7 @@ mp_uint_t mp_repl_autocomplete(const char *str, mp_uint_t len, const mp_print_t 
             }
             mp_print_str(print, "\n");
 
-            return (mp_uint_t)(-1); // indicate many matches
+            return (size_t)(-1); // indicate many matches
         }
     }
 }
