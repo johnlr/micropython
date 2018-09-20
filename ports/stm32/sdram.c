@@ -16,6 +16,10 @@
 #include "systick.h"
 #include "sdram.h"
 
+#ifdef SYSCFG_MEMRMP_SWP_FMC
+#include "stm32f4xx_ll_system.h"
+#endif
+
 #define SDRAM_TIMEOUT                            ((uint32_t)0xFFFF)
 #define SDRAM_MODEREG_BURST_LENGTH_1             ((uint16_t)0x0000)
 #define SDRAM_MODEREG_BURST_LENGTH_2             ((uint16_t)0x0001)
@@ -32,11 +36,19 @@
 #if defined(MICROPY_HW_FMC_SDCKE0) && defined(MICROPY_HW_FMC_SDNE0)
 #define FMC_SDRAM_BANK FMC_SDRAM_BANK1
 #define FMC_SDRAM_CMD_TARGET_BANK FMC_SDRAM_CMD_TARGET_BANK1
+#ifdef SYSCFG_MEMRMP_SWP_FMC
+#define SDRAM_START_ADDRESS 0x80000000
+#else
 #define SDRAM_START_ADDRESS 0xC0000000
+#endif
 #elif defined(MICROPY_HW_FMC_SDCKE1) && defined(MICROPY_HW_FMC_SDNE1)
 #define FMC_SDRAM_BANK FMC_SDRAM_BANK2
 #define FMC_SDRAM_CMD_TARGET_BANK FMC_SDRAM_CMD_TARGET_BANK2
+#ifdef SYSCFG_MEMRMP_SWP_FMC
+#define SDRAM_START_ADDRESS 0x90000000
+#else
 #define SDRAM_START_ADDRESS 0xD0000000
+#endif
 #endif
 
 #ifdef FMC_SDRAM_BANK
@@ -50,6 +62,10 @@ bool sdram_init(void) {
     FMC_SDRAM_TimingTypeDef SDRAM_Timing;
     FMC_SDRAM_CommandTypeDef command;
 
+    #ifdef SYSCFG_MEMRMP_SWP_FMC
+    /* Move sdram to address range that allows execution */
+    LL_SYSCFG_EnableFMCMemorySwapping();
+    #endif
     __HAL_RCC_FMC_CLK_ENABLE();
 
     #if defined(MICROPY_HW_FMC_SDCKE0)
